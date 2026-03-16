@@ -1,0 +1,22 @@
+[package]
+name = "voicemcu-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+voicemcu-common = { path = "../common" }
+tokio = { version = "1", features = ["full"] }
+quinn = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+bytes = "1"
+cpal = "0.15"
+ringbuf = "0.4"
+ring = "0.17"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-core = "0.3"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

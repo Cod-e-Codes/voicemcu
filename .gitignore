@@ -1,0 +1,24 @@
+# Rust
+/target/
+Cargo.lock
+
+# Generated certs
+*.pem
+
+# Logs
+*.log
+
+# Config overrides
+*.toml
+!Cargo.toml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
