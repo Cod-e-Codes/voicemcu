@@ -7,7 +7,9 @@ use crate::audio::PcmFrame;
 pub const DEFAULT_JITTER_DEPTH: usize = 4;
 
 pub struct JitterBuffer {
-    slots: Vec<Option<PcmFrame>>,
+    // Each slot carries its sequence number so we can distinguish fresh frames
+    // from stale data after a resync without wiping the whole buffer.
+    slots: Vec<Option<(u32, PcmFrame)>>,
     depth: usize,
     read_seq: u32,
     initialized: bool,
@@ -49,13 +51,10 @@ impl JitterBuffer {
                 "jitter buffer overrun -- dropping old frames to re-sync"
             );
             self.read_seq = seq.wrapping_sub(self.depth as u32 - 1);
-            for slot in &mut self.slots {
-                *slot = None;
-            }
         }
 
         let idx = seq as usize % self.depth;
-        self.slots[idx] = Some(frame);
+        self.slots[idx] = Some((seq, frame));
         true
     }
 
@@ -65,7 +64,13 @@ impl JitterBuffer {
             return None;
         }
         let idx = self.read_seq as usize % self.depth;
-        let frame = self.slots[idx].take();
+        let frame = match self.slots[idx] {
+            Some((slot_seq, frame)) if slot_seq == self.read_seq => {
+                self.slots[idx] = None;
+                Some(frame)
+            }
+            _ => None,
+        };
         self.read_seq = self.read_seq.wrapping_add(1);
         frame
     }
@@ -147,6 +152,24 @@ mod tests {
             }
         }
         assert!(found, "should find the overrun frame after resync");
+    }
+
+    #[test]
+    fn overrun_preserves_frames_already_buffered_in_window() {
+        let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+        jb.insert(100, make_frame(0.1));
+        jb.insert(101, make_frame(0.2));
+        jb.insert(102, make_frame(0.3));
+        jb.insert(103, make_frame(0.4));
+
+        // This jumps the read pointer forward, but frames already present in the
+        // new window should remain available.
+        jb.insert(104, make_frame(0.5));
+
+        assert!((jb.pop().unwrap()[0] - 0.2).abs() < 1e-6);
+        assert!((jb.pop().unwrap()[0] - 0.3).abs() < 1e-6);
+        assert!((jb.pop().unwrap()[0] - 0.4).abs() < 1e-6);
+        assert!((jb.pop().unwrap()[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]
