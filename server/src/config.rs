@@ -288,60 +288,80 @@ mod tests {
 
     #[test]
     fn validation_rejects_low_bitrate() {
-        let mut c = ServerConfig::default();
-        c.bitrate = 100;
+        let c = ServerConfig {
+            bitrate: 100,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_high_bitrate() {
-        let mut c = ServerConfig::default();
-        c.bitrate = 600_000;
+        let c = ServerConfig {
+            bitrate: 600_000,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_room_size() {
-        let mut c = ServerConfig::default();
-        c.max_room_size = 0;
+        let c = ServerConfig {
+            max_room_size: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_jitter_depth() {
-        let mut c = ServerConfig::default();
-        c.jitter_depth = 0;
+        let c = ServerConfig {
+            jitter_depth: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_excessive_jitter_depth() {
-        let mut c = ServerConfig::default();
-        c.jitter_depth = 33;
+        let c = ServerConfig {
+            jitter_depth: 33,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_negative_vad() {
-        let mut c = ServerConfig::default();
-        c.vad_threshold = -0.1;
+        let c = ServerConfig {
+            vad_threshold: -0.1,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_high_vad() {
-        let mut c = ServerConfig::default();
-        c.vad_threshold = 1.5;
+        let c = ServerConfig {
+            vad_threshold: 1.5,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_accepts_boundary_vad() {
-        let mut c = ServerConfig::default();
-        c.vad_threshold = 0.0;
-        assert!(c.validate().is_ok());
-        c.vad_threshold = 1.0;
-        assert!(c.validate().is_ok());
+        let c0 = ServerConfig {
+            vad_threshold: 0.0,
+            ..ServerConfig::default()
+        };
+        assert!(c0.validate().is_ok());
+
+        let c1 = ServerConfig {
+            vad_threshold: 1.0,
+            ..ServerConfig::default()
+        };
+        assert!(c1.validate().is_ok());
     }
 
     #[test]
@@ -352,25 +372,31 @@ mod tests {
 
     #[test]
     fn validation_rejects_cert_without_key() {
-        let mut c = ServerConfig::default();
-        c.cert_file = Some("cert.pem".into());
-        c.key_file = None;
+        let c = ServerConfig {
+            cert_file: Some("cert.pem".into()),
+            key_file: None,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_key_without_cert() {
-        let mut c = ServerConfig::default();
-        c.cert_file = None;
-        c.key_file = Some("key.pem".into());
+        let c = ServerConfig {
+            cert_file: None,
+            key_file: Some("key.pem".into()),
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_accepts_both_cert_and_key() {
-        let mut c = ServerConfig::default();
-        c.cert_file = Some("cert.pem".into());
-        c.key_file = Some("key.pem".into());
+        let c = ServerConfig {
+            cert_file: Some("cert.pem".into()),
+            key_file: Some("key.pem".into()),
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_ok());
     }
 
@@ -384,29 +410,37 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_signal_rate() {
-        let mut c = ServerConfig::default();
-        c.signal_rate = 0;
+        let c = ServerConfig {
+            signal_rate: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_signal_burst() {
-        let mut c = ServerConfig::default();
-        c.signal_burst = 0;
+        let c = ServerConfig {
+            signal_burst: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_connect_rate() {
-        let mut c = ServerConfig::default();
-        c.connect_rate_per_ip = 0;
+        let c = ServerConfig {
+            connect_rate_per_ip: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_connect_burst() {
-        let mut c = ServerConfig::default();
-        c.connect_burst_per_ip = 0;
+        let c = ServerConfig {
+            connect_burst_per_ip: 0,
+            ..ServerConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 

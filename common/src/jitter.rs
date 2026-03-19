@@ -144,11 +144,11 @@ mod tests {
         jb.insert(100, make_frame(1.0));
         let mut found = false;
         for _ in 0..DEFAULT_JITTER_DEPTH {
-            if let Some(f) = jb.pop() {
-                if (f[0] - 1.0).abs() < 1e-6 {
-                    found = true;
-                    break;
-                }
+            if let Some(f) = jb.pop()
+                && (f[0] - 1.0).abs() < 1e-6
+            {
+                found = true;
+                break;
             }
         }
         assert!(found, "should find the overrun frame after resync");

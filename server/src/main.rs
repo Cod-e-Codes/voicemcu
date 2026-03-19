@@ -293,12 +293,20 @@ async fn handle_connection(incoming: quinn::Incoming, server: Arc<Server>) -> Re
     };
 
     // Notify the room's mix task about the new client.
-    let _ = mix_cmd_tx
+    if let Err(e) = mix_cmd_tx
         .send(MixCommand::AddClient {
             client_id,
             audio_rx,
         })
-        .await;
+        .await
+    {
+        tracing::warn!(
+            %client_id,
+            %room_code,
+            error = ?e,
+            "failed to queue AddClient for mix task"
+        );
+    }
 
     write_signal(&mut send, &SignalMessage::Joined { client_id }).await?;
 
@@ -477,10 +485,29 @@ async fn handle_signaling(
                 }
 
                 let kicked = r.clients.remove(&target);
-                if kicked.is_some() {
-                    let _ = r
+                if kicked.is_some()
+                    && let Err(e) = r
                         .mix_cmd_tx
-                        .try_send(MixCommand::RemoveClient { client_id: target });
+                        .try_send(MixCommand::RemoveClient { client_id: target })
+                {
+                    match e {
+                        mpsc::error::TrySendError::Full(_) => {
+                            tracing::debug!(
+                                %client_id,
+                                %target,
+                                %room_code,
+                                "kick: mix command queue full"
+                            );
+                        }
+                        mpsc::error::TrySendError::Closed(_) => {
+                            tracing::warn!(
+                                %client_id,
+                                %target,
+                                %room_code,
+                                "kick: mix command channel closed"
+                            );
+                        }
+                    }
                 }
                 drop(r);
 

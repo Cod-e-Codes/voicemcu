@@ -542,7 +542,7 @@ mod tests {
         r.process(&[1.0], &mut output);
         // Should produce ~2 samples
         assert!(
-            output.len() >= 1 && output.len() <= 3,
+            !output.is_empty() && output.len() <= 3,
             "got {} samples",
             output.len()
         );

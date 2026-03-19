@@ -190,29 +190,37 @@ mod tests {
 
     #[test]
     fn validation_rejects_low_bitrate() {
-        let mut c = ClientConfig::default();
-        c.bitrate = 100;
+        let c = ClientConfig {
+            bitrate: 100,
+            ..ClientConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_ring_buffer() {
-        let mut c = ClientConfig::default();
-        c.ring_buffer_frames = 0;
+        let c = ClientConfig {
+            ring_buffer_frames: 0,
+            ..ClientConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_excessive_ring_buffer() {
-        let mut c = ClientConfig::default();
-        c.ring_buffer_frames = 101;
+        let c = ClientConfig {
+            ring_buffer_frames: 101,
+            ..ClientConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
     #[test]
     fn validation_rejects_zero_max_events() {
-        let mut c = ClientConfig::default();
-        c.max_events = 0;
+        let c = ClientConfig {
+            max_events: 0,
+            ..ClientConfig::default()
+        };
         assert!(c.validate().is_err());
     }
 
