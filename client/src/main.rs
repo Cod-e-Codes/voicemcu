@@ -17,7 +17,7 @@ use voicemcu_common::codec::{OpusDecoder, OpusEncoder};
 use voicemcu_common::jitter::{DEFAULT_JITTER_DEPTH, JitterBuffer};
 use voicemcu_common::protocol::{
     AudioFrameHeader, ClientId, FRAME_SIZE, MAX_OPUS_PACKET_SIZE, SAMPLE_RATE, SignalMessage,
-    decode_audio_datagram, decode_signal, encode_audio_datagram, encode_signal,
+    decode_audio_datagram, encode_audio_datagram, read_signal, write_signal,
 };
 
 use crate::config::{Cli, ClientConfig};
@@ -219,6 +219,11 @@ async fn main() -> Result<(), BoxError> {
         command_writer(sig_send, &mut cmd_rx).await;
     });
 
+    let bidi_tx = event_tx.clone();
+    let bidi_handle = tokio::spawn(async move {
+        bidi_recv_listener(sig_recv, bidi_tx).await;
+    });
+
     // -- Run TUI --------------------------------------------------------------
     tui::run(&mut terminal, &mut app, &mut event_rx, &cmd_tx).await;
 
@@ -230,6 +235,7 @@ async fn main() -> Result<(), BoxError> {
     recv_handle.abort();
     uni_handle.abort();
     cmd_handle.abort();
+    bidi_handle.abort();
 
     connection.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
@@ -261,6 +267,24 @@ async fn uni_stream_listener(conn: quinn::Connection, tx: mpsc::Sender<TuiEvent>
                 tx.send(TuiEvent::Disconnected).await.ok();
                 return;
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bidi recv listener (server error responses on the signaling stream)
+// ---------------------------------------------------------------------------
+
+async fn bidi_recv_listener(mut recv: quinn::RecvStream, tx: mpsc::Sender<TuiEvent>) {
+    loop {
+        match read_signal(&mut recv).await {
+            Ok(msg) => {
+                tracing::debug!(?msg, "bidi response received");
+                if tx.send(TuiEvent::Signal(msg)).await.is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
         }
     }
 }
@@ -507,7 +531,10 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::BadEncoding,
+                rustls::CertificateError::Other(rustls::OtherError(Arc::from(Box::from(
+                    "certificate fingerprint does not match pinned hash",
+                )
+                    as Box<dyn std::error::Error + Send + Sync>))),
             ))
         }
     }
@@ -590,25 +617,6 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
 // ---------------------------------------------------------------------------
 // Signal framing helpers (same wire format as server)
 // ---------------------------------------------------------------------------
-
-async fn read_signal(recv: &mut quinn::RecvStream) -> Result<SignalMessage, BoxError> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 65_536 {
-        return Err("signaling message too large".into());
-    }
-    let mut data = vec![0u8; len];
-    recv.read_exact(&mut data).await?;
-    Ok(decode_signal(&data)?)
-}
-
-async fn write_signal(send: &mut quinn::SendStream, msg: &SignalMessage) -> Result<(), BoxError> {
-    let data = encode_signal(msg)?;
-    send.write_all(&(data.len() as u32).to_be_bytes()).await?;
-    send.write_all(&data).await?;
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Hex helpers

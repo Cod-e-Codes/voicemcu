@@ -112,6 +112,34 @@ pub fn decode_signal(data: &[u8]) -> Result<SignalMessage, VoiceError> {
     postcard::from_bytes(data).map_err(VoiceError::from)
 }
 
+const MAX_SIGNAL_LEN: usize = 65_536;
+
+pub async fn read_signal<R: tokio::io::AsyncRead + Unpin>(
+    recv: &mut R,
+) -> Result<SignalMessage, Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_SIGNAL_LEN {
+        return Err("signaling message too large".into());
+    }
+    let mut data = vec![0u8; len];
+    recv.read_exact(&mut data).await?;
+    Ok(decode_signal(&data)?)
+}
+
+pub async fn write_signal<W: tokio::io::AsyncWrite + Unpin>(
+    send: &mut W,
+    msg: &SignalMessage,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::AsyncWriteExt;
+    let data = encode_signal(msg)?;
+    send.write_all(&(data.len() as u32).to_be_bytes()).await?;
+    send.write_all(&data).await?;
+    Ok(())
+}
+
 pub fn encode_audio_datagram(header: &AudioFrameHeader, opus_payload: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(AudioFrameHeader::SIZE + opus_payload.len());
     buf.extend_from_slice(&header.to_bytes());
@@ -297,5 +325,44 @@ mod tests {
         let datagram = encode_audio_datagram(&header, &[]);
         let (_, payload) = decode_audio_datagram(&datagram).expect("decode");
         assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn signal_error_round_trip() {
+        let msg = SignalMessage::Error {
+            message: "only the host can kick".into(),
+        };
+        let bytes = encode_signal(&msg).expect("encode");
+        assert_eq!(decode_signal(&bytes).expect("decode"), msg);
+    }
+
+    #[tokio::test]
+    async fn framed_signal_round_trip() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let msg = SignalMessage::Kick { target: 42 };
+        write_signal(&mut client, &msg).await.expect("write");
+        let decoded = read_signal(&mut server).await.expect("read");
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn framed_signal_error_round_trip() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let msg = SignalMessage::Error {
+            message: "rate limited".into(),
+        };
+        write_signal(&mut client, &msg).await.expect("write");
+        let decoded = read_signal(&mut server).await.expect("read");
+        assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn framed_signal_rejects_oversized() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let fake_len = (MAX_SIGNAL_LEN as u32 + 1).to_be_bytes();
+        use tokio::io::AsyncWriteExt;
+        client.write_all(&fake_len).await.expect("write len");
+        let result = read_signal(&mut server).await;
+        assert!(result.is_err());
     }
 }

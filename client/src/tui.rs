@@ -1047,4 +1047,14 @@ mod tests {
         assert!(msg.is_none());
         assert!(state.events.back().unwrap().0.contains("ambiguous"));
     }
+
+    #[test]
+    fn handle_signal_error_shows_in_events() {
+        let mut state = make_state();
+        state.handle_signal(SignalMessage::Error {
+            message: "only the host can kick".into(),
+        });
+        let last = &state.events.back().unwrap().0;
+        assert!(last.contains("only the host can kick"));
+    }
 }

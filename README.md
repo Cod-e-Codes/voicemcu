@@ -226,11 +226,14 @@ QUIC via `quinn`. All traffic runs over a single QUIC connection per client.
 - **Audio:** unreliable QUIC datagrams. No head-of-line blocking, no
   retransmission. Each datagram carries a 16-byte header (client ID,
   sequence number, timestamp) followed by the Opus payload.
-- **Signaling (client to server):** one reliable bidirectional QUIC stream
-  per client. Messages are length-prefixed `postcard`-encoded enums
-  (`SignalMessage`). Used for join, leave, mute, kick, force-mute, block,
-  and unblock.
-- **Signaling (server to client):** per-event unidirectional QUIC streams.
+- **Signaling (bidirectional stream):** one reliable bidirectional QUIC
+  stream per client. Messages are length-prefixed `postcard`-encoded enums
+  (`SignalMessage`). The client writes commands (join, leave, mute, kick,
+  force-mute, block, unblock) and the server writes error responses back
+  on the same stream (e.g. "only the host can kick", "rate limited").
+  Framing helpers (`read_signal` / `write_signal`) live in the `common`
+  crate, generic over `AsyncRead` / `AsyncWrite`.
+- **Signaling (server push):** per-event unidirectional QUIC streams.
   Each push (peer joined, peer left, roster update, host transfer, kick
   notice, mute notification) opens a fresh uni stream, writes the
   length-prefixed message, and finishes the stream. The client accepts uni

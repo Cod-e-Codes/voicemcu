@@ -21,7 +21,7 @@ use voicemcu_common::codec::{OpusDecoder, OpusEncoder};
 use voicemcu_common::jitter::JitterBuffer;
 use voicemcu_common::protocol::{
     AudioFrameHeader, ClientId, ClientInfo, FRAME_SIZE, MAX_OPUS_PACKET_SIZE, SignalMessage,
-    decode_audio_datagram, decode_signal, encode_audio_datagram, encode_signal,
+    decode_audio_datagram, encode_audio_datagram, encode_signal, read_signal, write_signal,
 };
 
 use crate::config::{Cli, ServerConfig};
@@ -337,7 +337,7 @@ async fn handle_connection(incoming: quinn::Incoming, server: Arc<Server>) -> Re
         recv_datagrams(conn_for_datagrams, audio_tx, client_id).await;
     });
 
-    handle_signaling(&mut recv, &server, &room_code, client_id).await;
+    handle_signaling(&mut recv, &mut send, &server, &room_code, client_id).await;
 
     datagram_handle.abort();
     let was_present = server
@@ -430,6 +430,7 @@ async fn recv_datagrams(
 
 async fn handle_signaling(
     recv: &mut quinn::RecvStream,
+    send: &mut quinn::SendStream,
     server: &Server,
     room_code: &str,
     client_id: ClientId,
@@ -455,6 +456,14 @@ async fn handle_signaling(
 
         if !bucket.try_consume() {
             tracing::warn!(%client_id, "signaling rate limited");
+            write_signal(
+                send,
+                &SignalMessage::Error {
+                    message: "rate limited".into(),
+                },
+            )
+            .await
+            .ok();
             continue;
         }
 
@@ -483,6 +492,15 @@ async fn handle_signaling(
                 };
                 if !r.is_host(client_id) {
                     tracing::warn!(%client_id, "non-host tried to kick");
+                    drop(r);
+                    write_signal(
+                        send,
+                        &SignalMessage::Error {
+                            message: "only the host can kick".into(),
+                        },
+                    )
+                    .await
+                    .ok();
                     continue;
                 }
                 if target == client_id {
@@ -541,6 +559,15 @@ async fn handle_signaling(
                 };
                 if !r.is_host(client_id) {
                     tracing::warn!(%client_id, "non-host tried to server-mute");
+                    drop(r);
+                    write_signal(
+                        send,
+                        &SignalMessage::Error {
+                            message: "only the host can server-mute".into(),
+                        },
+                    )
+                    .await
+                    .ok();
                     continue;
                 }
                 if let Some(s) = r.clients.get(&target) {
@@ -849,25 +876,6 @@ async fn cleanup_loop(server: Arc<Server>) {
 // ---------------------------------------------------------------------------
 // Signal framing helpers
 // ---------------------------------------------------------------------------
-
-async fn read_signal(recv: &mut quinn::RecvStream) -> Result<SignalMessage, BoxError> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > 65_536 {
-        return Err("signaling message too large".into());
-    }
-    let mut data = vec![0u8; len];
-    recv.read_exact(&mut data).await?;
-    Ok(decode_signal(&data)?)
-}
-
-async fn write_signal(send: &mut quinn::SendStream, msg: &SignalMessage) -> Result<(), BoxError> {
-    let data = encode_signal(msg)?;
-    send.write_all(&(data.len() as u32).to_be_bytes()).await?;
-    send.write_all(&data).await?;
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
