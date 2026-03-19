@@ -345,6 +345,15 @@ with `--danger-skip-verify`. Using `--danger-skip-verify` prints a warning
 to stderr before the TUI starts and displays a persistent warning in the
 TUI events panel.
 
+## Security and deployment
+
+- **Intended deployment model**: voicemcu is designed primarily for **trusted environments** such as a home LAN or a private VPN (e.g. WireGuard, Tailscale). Exposing it directly to the public internet is possible but assumes you understand the trade-offs below.
+- **TLS verification**: On first server start, copy the logged certificate fingerprint and pass it to all clients via `--cert-hash <hex>`. This pins the server and protects against MITM on any untrusted network. Avoid `--danger-skip-verify` except for quick local tests on a fully trusted network.
+- **Port forwarding**: If you test or run over plain port forwarding on your router, only forward while you are actually using the server, and disable the rule when idle. Use a non-obvious external port if you expose it publicly, and always combine that with `--cert-hash` and hard-to-guess room codes.
+- **Access model**: There is no built-in user authentication; **room codes are the only access control**. Treat room codes like invite tokens: share them out-of-band with people you trust and avoid simple, easily guessed values if the server is reachable from the internet.
+- **Rate limits**: The server enforces per-IP connection rate limits and per-client signaling rate limits. For hostile or noisy environments, you can tighten `signal_rate`, `signal_burst`, `connect_rate_per_ip`, and `connect_burst_per_ip` in the server config to reduce abuse impact.
+- **Host hardening**: Run `voicemcu-server` as an unprivileged user, keep the OS up to date, and use your system firewall to restrict inbound traffic to the networks and ports you actually need (LAN/VPN subnets, port 4433 or your chosen forwarded port).
+
 ## Known limitations
 
 - **No authentication.** Room codes are the only access control.
