@@ -303,7 +303,7 @@ fn build_capture_stream(
                 resampler.process(mono, &mut resample_buf);
                 let pushed = capture_prod.push_slice(&resample_buf);
                 if pushed < resample_buf.len() {
-                    tracing::debug!(
+                    tracing::trace!(
                         pushed,
                         expected = resample_buf.len(),
                         "capture ring buffer overflow"
@@ -312,7 +312,7 @@ fn build_capture_stream(
             } else {
                 let pushed = capture_prod.push_slice(mono);
                 if pushed < mono.len() {
-                    tracing::debug!(
+                    tracing::trace!(
                         pushed,
                         expected = mono.len(),
                         "capture ring buffer overflow"
@@ -358,7 +358,7 @@ fn build_playback_stream(
             mono_buf.resize(needed, 0.0);
             let filled = playback_cons.pop_slice(&mut mono_buf);
             if filled < needed {
-                tracing::debug!(filled, needed, "playback ring buffer underrun");
+                tracing::trace!(filled, needed, "playback ring buffer underrun");
             }
             mono_buf.truncate(filled);
 

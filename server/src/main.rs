@@ -419,7 +419,7 @@ async fn recv_datagrams(
             })
             .is_err()
         {
-            tracing::debug!(%client_id, seq = header.sequence, "audio channel full, dropping packet");
+            tracing::trace!(%client_id, seq = header.sequence, "audio channel full, dropping packet");
         }
     }
 }

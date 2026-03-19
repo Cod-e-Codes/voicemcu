@@ -429,7 +429,7 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
                 }
 
                 if !jitter_buf.insert(header.sequence, pcm) {
-                    tracing::debug!(seq = header.sequence, "dropped late downstream packet");
+                    tracing::trace!(seq = header.sequence, "dropped late downstream packet");
                 }
             }
             _ = interval.tick() => {
@@ -439,7 +439,7 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
                 let frame = match jitter_buf.pop() {
                     Some(f) => f,
                     None => {
-                        tracing::debug!("downstream jitter underrun -- PLC");
+                        tracing::trace!("downstream jitter underrun -- PLC");
                         let mut plc = [0.0f32; FRAME_SIZE];
                         let _ = decoder.plc(&mut plc);
                         plc
@@ -447,7 +447,7 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
                 };
                 let pushed = playback_prod.push_slice(&frame);
                 if pushed < frame.len() {
-                    tracing::debug!(
+                    tracing::trace!(
                         pushed,
                         expected = frame.len(),
                         "playback ring buffer overflow"
