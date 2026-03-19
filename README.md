@@ -191,7 +191,8 @@ the server transfers the role to the remaining client with the lowest ID.
 If everyone leaves and a new client joins the same room before cleanup
 removes it, the server detects the hostless state and assigns host to the
 newcomer. All host transitions use compare-and-swap on an atomic to
-prevent races. Only the host can `/kick` and `/forcemute`.
+prevent races. Only the host can `/kick` and `/forcemute`; non-host
+attempts receive an error response.
 
 ### Blocking
 
@@ -338,10 +339,11 @@ Two token-bucket rate limiters protect against DoS:
   (default 5/s) and `connect_burst_per_ip` (default 10).
 - **Signaling rate limiting.** Each client connection gets its own token
   bucket, initialized on join. Every signaling command (mute, kick,
-  force-mute, block, unblock) consumes one token; excess commands are
-  silently dropped with a log warning. `Leave` is always allowed so clients
-  can disconnect even when rate-limited. Configurable via `signal_rate`
-  (default 10/s) and `signal_burst` (default 20).
+  force-mute, block, unblock) consumes one token; excess commands receive
+  an error response on the bidirectional signaling stream. `Leave` is
+  always allowed so clients can disconnect even when rate-limited.
+  Configurable via `signal_rate` (default 10/s) and `signal_burst`
+  (default 20).
 
 ### TLS
 
