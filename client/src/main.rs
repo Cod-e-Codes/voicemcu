@@ -14,6 +14,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 use voicemcu_common::codec::{OpusDecoder, OpusEncoder};
+use voicemcu_common::jitter::{DEFAULT_JITTER_DEPTH, JitterBuffer};
 use voicemcu_common::protocol::{
     AudioFrameHeader, ClientId, FRAME_SIZE, MAX_OPUS_PACKET_SIZE, SAMPLE_RATE, SignalMessage,
     decode_audio_datagram, decode_signal, encode_audio_datagram, encode_signal,
@@ -41,6 +42,27 @@ async fn main() -> Result<(), BoxError> {
     let name = cli.name.clone().ok_or("display name is required")?;
 
     let config = ClientConfig::load(&cli)?;
+
+    // -- Logging (before any tracing calls) ------------------------------------
+    match std::fs::File::create(&config.log_file) {
+        Ok(file) => {
+            tracing_subscriber::fmt()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        "info,voicemcu_client=debug".parse().expect("valid filter")
+                    }),
+                )
+                .init();
+        }
+        Err(_) => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_env_filter("off")
+                .init();
+        }
+    }
 
     // -- Certificate verification mode ----------------------------------------
     let cert_mode = if let Some(ref hex) = cli.cert_hash {
@@ -100,26 +122,6 @@ async fn main() -> Result<(), BoxError> {
     // -- TUI setup ------------------------------------------------------------
     tui::install_panic_hook();
     let mut terminal = tui::setup_terminal()?;
-
-    match std::fs::File::create(&config.log_file) {
-        Ok(file) => {
-            tracing_subscriber::fmt()
-                .with_writer(std::sync::Mutex::new(file))
-                .with_ansi(false)
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                        "info,voicemcu_client=debug".parse().expect("valid filter")
-                    }),
-                )
-                .init();
-        }
-        Err(_) => {
-            tracing_subscriber::fmt()
-                .with_writer(std::io::sink)
-                .with_env_filter("off")
-                .init();
-        }
-    }
 
     let mut app = AppState::new(client_id, room.clone(), name.clone(), config.max_events);
     app.set_peers_from_info(&initial_roster);
@@ -229,7 +231,6 @@ async fn main() -> Result<(), BoxError> {
     uni_handle.abort();
     cmd_handle.abort();
 
-    write_signal_fire_and_forget(&connection, &SignalMessage::Leave).await;
     connection.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
     tracing::info!("disconnected");
@@ -278,17 +279,6 @@ async fn command_writer(
             tracing::error!(error = %e, "signaling write failed");
             return;
         }
-    }
-}
-
-async fn write_signal_fire_and_forget(conn: &quinn::Connection, msg: &SignalMessage) {
-    if let Ok(data) = encode_signal(msg)
-        && let Ok(mut send) = conn.open_uni().await
-    {
-        let len = (data.len() as u32).to_be_bytes();
-        let _ = send.write_all(&len).await;
-        let _ = send.write_all(&data).await;
-        let _ = send.finish();
     }
 }
 
@@ -407,32 +397,64 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
             return;
         }
     };
+    let mut jitter_buf = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+    let mut interval = tokio::time::interval(Duration::from_millis(20));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     tracing::debug!("receive decode loop started");
 
     loop {
-        let data = match conn.read_datagram().await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::info!(error = %e, "datagram receive ended");
-                return;
-            }
-        };
+        tokio::select! {
+            result = conn.read_datagram() => {
+                let data = match result {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::info!(error = %e, "datagram receive ended");
+                        return;
+                    }
+                };
 
-        let (_header, opus_payload) = match decode_audio_datagram(&data) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::debug!(error = %e, "malformed audio datagram");
-                continue;
-            }
-        };
+                let (header, opus_payload) = match decode_audio_datagram(&data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "malformed audio datagram");
+                        continue;
+                    }
+                };
 
-        let mut pcm = [0.0f32; FRAME_SIZE];
-        if let Err(e) = decoder.decode(opus_payload, &mut pcm) {
-            tracing::debug!(error = %e, "opus decode failed");
-            continue;
+                let mut pcm = [0.0f32; FRAME_SIZE];
+                if let Err(e) = decoder.decode(opus_payload, &mut pcm) {
+                    tracing::debug!(error = %e, "opus decode failed");
+                    continue;
+                }
+
+                if !jitter_buf.insert(header.sequence, pcm) {
+                    tracing::debug!(seq = header.sequence, "dropped late downstream packet");
+                }
+            }
+            _ = interval.tick() => {
+                if !jitter_buf.is_initialized() {
+                    continue;
+                }
+                let frame = match jitter_buf.pop() {
+                    Some(f) => f,
+                    None => {
+                        tracing::debug!("downstream jitter underrun -- PLC");
+                        let mut plc = [0.0f32; FRAME_SIZE];
+                        let _ = decoder.plc(&mut plc);
+                        plc
+                    }
+                };
+                let pushed = playback_prod.push_slice(&frame);
+                if pushed < frame.len() {
+                    tracing::debug!(
+                        pushed,
+                        expected = frame.len(),
+                        "playback ring buffer overflow"
+                    );
+                }
+            }
         }
-
-        playback_prod.push_slice(&pcm);
     }
 }
 

@@ -240,7 +240,8 @@ QUIC via `quinn`. All traffic runs over a single QUIC connection per client.
 
 Opus via `audiopus`. 20 ms frames, 48 kHz, mono. Target bitrate is
 configurable (default 48 kbps). Packet loss concealment uses Opus PLC
-(decode with null input on jitter buffer underrun).
+(decode with null input on jitter buffer underrun) on both the server
+mix path and the client receive path.
 
 ### Server mix loop
 
@@ -282,10 +283,13 @@ offset on each server start (via `RandomState`) to avoid predictable IDs.
 
 ### Jitter buffer
 
-A fixed-depth circular buffer (configurable, default 4 slots = 80 ms). Packets are inserted by
-sequence number. Pops return frames in order; missing slots return `None`
-(triggering PLC). Sequence comparisons use `wrapping_sub` so the buffer
-handles 32-bit sequence wraparound correctly during long-running sessions.
+A fixed-depth circular buffer (default 4 slots = 80 ms; configurable on
+the server via `jitter_depth`). Used on both the server mix path (one per
+upstream client) and the client receive path (one for the downstream mixed
+stream). Packets are inserted by sequence number. Pops return frames in
+order; missing slots return `None` (triggering PLC). Sequence comparisons
+use `wrapping_sub` so the buffer handles 32-bit sequence wraparound
+correctly during long-running sessions.
 
 ### Client pipeline
 
@@ -304,9 +308,13 @@ active device names and configurations on connect.
 Microphone samples flow through a lock-free SPSC ring buffer (`ringbuf`
 crate, configurable capacity, default 200 ms) into an async encode loop
 that accumulates 960-sample frames, encodes each to Opus, and sends QUIC
-datagrams. Incoming datagrams are decoded and pushed to a second ring
-buffer drained by the speaker callback. No locks touch the real-time `cpal`
-audio thread.
+datagrams. Incoming mixed datagrams from the server pass through a
+client-side jitter buffer (same `JitterBuffer` implementation used by the
+server, default 4 slots = 80 ms) that reorders out-of-sequence packets
+and triggers Opus PLC on missing frames. A 20 ms `tokio::select!` tick
+pops frames from the jitter buffer and pushes decoded PCM into a second
+ring buffer drained by the speaker callback. No locks touch the real-time
+`cpal` audio thread.
 
 ### Input validation
 

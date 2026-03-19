@@ -412,10 +412,15 @@ async fn recv_datagrams(
             }
         };
 
-        let _ = audio_tx.try_send(AudioPacket {
-            sequence: header.sequence,
-            data: data.slice(AudioFrameHeader::SIZE..),
-        });
+        if audio_tx
+            .try_send(AudioPacket {
+                sequence: header.sequence,
+                data: data.slice(AudioFrameHeader::SIZE..),
+            })
+            .is_err()
+        {
+            tracing::debug!(%client_id, seq = header.sequence, "audio channel full, dropping packet");
+        }
     }
 }
 
