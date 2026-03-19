@@ -278,15 +278,14 @@ connection, mute flags, and block list. Audio processing state (codecs,
 jitter buffers, sequence counters) lives exclusively inside the room's mix
 task. Empty rooms are garbage-collected at a configurable interval (default
 30 seconds). Client IDs are 64-bit integers seeded from a random starting
-offset on each server start (via `RandomState`) to prevent trivial
-enumeration.
+offset on each server start (via `RandomState`) to avoid predictable IDs.
 
 ### Jitter buffer
 
 A fixed-depth circular buffer (configurable, default 4 slots = 80 ms). Packets are inserted by
 sequence number. Pops return frames in order; missing slots return `None`
 (triggering PLC). Sequence comparisons use `wrapping_sub` so the buffer
-handles u32 wrap correctly after ~994 days of continuous streaming.
+handles 32-bit sequence wraparound correctly during long-running sessions.
 
 ### Client pipeline
 
