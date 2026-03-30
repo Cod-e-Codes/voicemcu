@@ -24,6 +24,7 @@ use crate::config::{Cli, ClientConfig};
 use crate::tui::{AppState, TuiEvent};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+const CODEC_RESET_THRESHOLD: u8 = 3;
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -317,6 +318,7 @@ async fn capture_encode_loop(
     notify: Arc<Notify>,
     bitrate: i32,
 ) {
+    let mut encode_fail_streak: u8 = 0;
     let mut encoder = match OpusEncoder::new(bitrate) {
         Ok(e) => e,
         Err(e) => {
@@ -336,9 +338,30 @@ async fn capture_encode_loop(
             capture_cons.pop_slice(&mut pcm);
 
             let len = match encoder.encode(&pcm, &mut opus_out) {
-                Ok(l) => l,
+                Ok(l) => {
+                    encode_fail_streak = 0;
+                    l
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, seq = sequence, "opus encode failed");
+                    encode_fail_streak = encode_fail_streak.saturating_add(1);
+                    if encode_fail_streak >= CODEC_RESET_THRESHOLD {
+                        match OpusEncoder::new(bitrate) {
+                            Ok(new_encoder) => {
+                                encoder = new_encoder;
+                                encode_fail_streak = 0;
+                                tracing::warn!(
+                                    "capture encoder reset after repeated encode failures"
+                                );
+                            }
+                            Err(reset_err) => {
+                                tracing::error!(
+                                    error = %reset_err,
+                                    "failed to reset capture encoder"
+                                );
+                            }
+                        }
+                    }
                     continue;
                 }
             };
@@ -364,6 +387,7 @@ async fn capture_encode_loop(
 // ---------------------------------------------------------------------------
 
 async fn test_tone_loop(conn: quinn::Connection, client_id: ClientId, bitrate: i32) {
+    let mut encode_fail_streak: u8 = 0;
     let mut encoder = match OpusEncoder::new(bitrate) {
         Ok(e) => e,
         Err(e) => {
@@ -391,8 +415,32 @@ async fn test_tone_loop(conn: quinn::Connection, client_id: ClientId, bitrate: i
         }
 
         let len = match encoder.encode(&pcm, &mut opus_out) {
-            Ok(l) => l,
-            Err(_) => continue,
+            Ok(l) => {
+                encode_fail_streak = 0;
+                l
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, seq = sequence, "test-tone opus encode failed");
+                encode_fail_streak = encode_fail_streak.saturating_add(1);
+                if encode_fail_streak >= CODEC_RESET_THRESHOLD {
+                    match OpusEncoder::new(bitrate) {
+                        Ok(new_encoder) => {
+                            encoder = new_encoder;
+                            encode_fail_streak = 0;
+                            tracing::warn!(
+                                "test-tone encoder reset after repeated encode failures"
+                            );
+                        }
+                        Err(reset_err) => {
+                            tracing::error!(
+                                error = %reset_err,
+                                "failed to reset test-tone encoder"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
         };
 
         let header = AudioFrameHeader {
@@ -414,6 +462,7 @@ async fn test_tone_loop(conn: quinn::Connection, client_id: ClientId, bitrate: i
 // ---------------------------------------------------------------------------
 
 async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::HeapProd<f32>) {
+    let mut decode_fail_streak: u8 = 0;
     let mut decoder = match OpusDecoder::new() {
         Ok(d) => d,
         Err(e) => {
@@ -449,8 +498,28 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
                 let mut pcm = [0.0f32; FRAME_SIZE];
                 if let Err(e) = decoder.decode(opus_payload, &mut pcm) {
                     tracing::debug!(error = %e, "opus decode failed");
+                    decode_fail_streak = decode_fail_streak.saturating_add(1);
+                    if decode_fail_streak >= CODEC_RESET_THRESHOLD {
+                        match OpusDecoder::new() {
+                            Ok(new_decoder) => {
+                                decoder = new_decoder;
+                                jitter_buf = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+                                decode_fail_streak = 0;
+                                tracing::warn!(
+                                    "downstream decoder reset after repeated decode failures"
+                                );
+                            }
+                            Err(reset_err) => {
+                                tracing::error!(
+                                    error = %reset_err,
+                                    "failed to reset downstream decoder"
+                                );
+                            }
+                        }
+                    }
                     continue;
                 }
+                decode_fail_streak = 0;
 
                 if !jitter_buf.insert(header.sequence, pcm) {
                     tracing::trace!(seq = header.sequence, "dropped late downstream packet");

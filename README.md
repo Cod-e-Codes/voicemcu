@@ -15,6 +15,15 @@ per-client blocking. Native only -- no WebRTC, no browser support.
 Requires a Rust toolchain (edition 2024, rustc 1.85+) and a C compiler for
 the native Opus build (`cl.exe` / MSVC on Windows, `cc` on Linux/macOS).
 
+On Linux, you also need development packages for ALSA and autotools so
+native audio and Opus dependencies can be discovered during `cargo build`.
+For Ubuntu/Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y libasound2-dev automake autotools-dev libtool pkg-config
+```
+
 ```
 cargo build --release
 ```
