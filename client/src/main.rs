@@ -9,10 +9,12 @@ use bytes::Bytes;
 use clap::Parser;
 use ratatui::style::{Color, Style, Stylize};
 use ringbuf::HeapRb;
-use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use ringbuf::traits::{Consumer, Producer, Split};
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::time::{MissedTickBehavior, interval};
 
+use voicemcu_common::audio::SILENCE_FRAME;
 use voicemcu_common::codec::{OpusDecoder, OpusEncoder};
 use voicemcu_common::jitter::{DEFAULT_JITTER_DEPTH, JitterBuffer};
 use voicemcu_common::protocol::{
@@ -195,13 +197,12 @@ async fn main() -> Result<(), BoxError> {
 
     // -- Spawn background tasks -----------------------------------------------
     let conn_tx = connection.clone();
-    let notify_clone = Arc::clone(&capture_notify);
 
     let send_handle = if use_test_tone {
         tokio::spawn(test_tone_loop(conn_tx, client_id, bitrate))
     } else {
         tokio::spawn(async move {
-            capture_encode_loop(conn_tx, client_id, &mut capture_cons, notify_clone, bitrate).await;
+            capture_encode_loop(conn_tx, client_id, &mut capture_cons, bitrate).await;
         })
     };
 
@@ -315,7 +316,6 @@ async fn capture_encode_loop(
     conn: quinn::Connection,
     client_id: ClientId,
     capture_cons: &mut ringbuf::HeapCons<f32>,
-    notify: Arc<Notify>,
     bitrate: i32,
 ) {
     let mut encode_fail_streak: u8 = 0;
@@ -330,55 +330,58 @@ async fn capture_encode_loop(
     let mut sequence: u32 = 0;
     let mut opus_out = [0u8; MAX_OPUS_PACKET_SIZE];
 
+    // Paced like `test_tone_loop`: the server mix task expects one frame per 20 ms wall clock.
+    // Callback-driven sends can run below that rate (or stall between cpal wakes), which makes
+    // the jitter buffer advance `read_seq` on PLC while the client's sequence lags, so inserts
+    // are rejected as late and underruns never recover.
+    let mut tick = interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     loop {
-        notify.notified().await;
+        tick.tick().await;
 
-        while capture_cons.occupied_len() >= FRAME_SIZE {
-            let mut pcm = [0.0f32; FRAME_SIZE];
-            capture_cons.pop_slice(&mut pcm);
+        let mut pcm = SILENCE_FRAME;
+        capture_cons.pop_slice(&mut pcm);
 
-            let len = match encoder.encode(&pcm, &mut opus_out) {
-                Ok(l) => {
-                    encode_fail_streak = 0;
-                    l
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, seq = sequence, "opus encode failed");
-                    encode_fail_streak = encode_fail_streak.saturating_add(1);
-                    if encode_fail_streak >= CODEC_RESET_THRESHOLD {
-                        match OpusEncoder::new(bitrate) {
-                            Ok(new_encoder) => {
-                                encoder = new_encoder;
-                                encode_fail_streak = 0;
-                                tracing::warn!(
-                                    "capture encoder reset after repeated encode failures"
-                                );
-                            }
-                            Err(reset_err) => {
-                                tracing::error!(
-                                    error = %reset_err,
-                                    "failed to reset capture encoder"
-                                );
-                            }
+        let len = match encoder.encode(&pcm, &mut opus_out) {
+            Ok(l) => {
+                encode_fail_streak = 0;
+                l
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, seq = sequence, "opus encode failed");
+                encode_fail_streak = encode_fail_streak.saturating_add(1);
+                if encode_fail_streak >= CODEC_RESET_THRESHOLD {
+                    match OpusEncoder::new(bitrate) {
+                        Ok(new_encoder) => {
+                            encoder = new_encoder;
+                            encode_fail_streak = 0;
+                            tracing::warn!("capture encoder reset after repeated encode failures");
+                        }
+                        Err(reset_err) => {
+                            tracing::error!(
+                                error = %reset_err,
+                                "failed to reset capture encoder"
+                            );
                         }
                     }
-                    continue;
                 }
-            };
-
-            let header = AudioFrameHeader {
-                client_id,
-                sequence,
-                timestamp: sequence.wrapping_mul(FRAME_SIZE as u32),
-            };
-            let datagram = encode_audio_datagram(&header, &opus_out[..len]);
-
-            if let Err(e) = conn.send_datagram(Bytes::from(datagram)) {
-                tracing::info!(error = %e, "datagram send failed, stopping capture");
-                return;
+                continue;
             }
-            sequence = sequence.wrapping_add(1);
+        };
+
+        let header = AudioFrameHeader {
+            client_id,
+            sequence,
+            timestamp: sequence.wrapping_mul(FRAME_SIZE as u32),
+        };
+        let datagram = encode_audio_datagram(&header, &opus_out[..len]);
+
+        if let Err(e) = conn.send_datagram(Bytes::from(datagram)) {
+            tracing::info!(error = %e, "datagram send failed, stopping capture");
+            return;
         }
+        sequence = sequence.wrapping_add(1);
     }
 }
 
@@ -535,6 +538,7 @@ async fn recv_decode_loop(conn: quinn::Connection, playback_prod: &mut ringbuf::
                         tracing::trace!("downstream jitter underrun -- PLC");
                         let mut plc = [0.0f32; FRAME_SIZE];
                         let _ = decoder.plc(&mut plc);
+                        jitter_buf.advance_expected();
                         plc
                     }
                 };

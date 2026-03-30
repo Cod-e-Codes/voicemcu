@@ -64,7 +64,7 @@ the QUIC endpoint.
 | `--bind <addr>` | Bind address (default: `0.0.0.0:4433`). |
 | `--cert-file <path>` | TLS certificate file (PEM). Generated and saved if missing. |
 | `--key-file <path>` | TLS private key file (PEM). Used together with `--cert-file`. |
-| `--bitrate <bps>` | Opus bitrate in bits per second (default: 48000). |
+| `--bitrate <bps>` | Opus bitrate in bits per second (default: 32000). |
 | `--max-room-size <n>` | Maximum clients per room (default: 64). |
 | `--jitter-depth <n>` | Jitter buffer depth in 20 ms frames (default: 4). |
 | `--vad-threshold <f>` | VAD RMS threshold, 0.0-1.0 (default: 0.002). |
@@ -96,7 +96,7 @@ voicemcu-client <server> <room> <name> [options]
 | `--danger-skip-verify` | Skip all certificate verification. Prints a warning to stderr and the TUI events panel. |
 | `--test-tone` | Send a 440 Hz sine wave instead of microphone input. |
 | `--log-file <path>` | Log file path (default: `voicemcu.log`). |
-| `--bitrate <bps>` | Opus upstream bitrate in bits per second (default: 48000). |
+| `--bitrate <bps>` | Opus upstream bitrate in bits per second (default: 32000). |
 | `--ring-buffer-frames <n>` | Audio ring buffer size in 20 ms frames (default: 10). |
 | `--max-events <n>` | Maximum events in TUI log (default: 1000). |
 | `--input-device <name>` | Microphone device name (default: system default). |
@@ -129,7 +129,7 @@ file, which take precedence over built-in defaults.
 bind = "0.0.0.0:4433"
 cert_file = "cert.pem"       # omit for ephemeral certs
 key_file = "key.pem"         # must be set together with cert_file
-bitrate = 48000              # Opus bitrate (bps) for mixed audio sent to clients
+bitrate = 32000              # Opus bitrate (bps) for mixed audio sent to clients
 max_room_size = 64           # max clients per room
 jitter_depth = 4             # jitter buffer slots (each = 20 ms)
 vad_threshold = 0.002        # RMS below this is treated as silence
@@ -149,7 +149,7 @@ Run `voicemcu-server --dump-config` to emit a complete default config file.
 
 ```toml
 log_file = "voicemcu.log"    # diagnostic log output path
-bitrate = 48000              # Opus bitrate (bps) for upstream mic audio
+bitrate = 32000              # Opus bitrate (bps) for upstream mic audio
 ring_buffer_frames = 10      # audio ring buffer size in 20 ms frames
 max_events = 1000            # max entries in the TUI events log
 # input_device = "Microphone (Realtek)"  # omit for system default
@@ -251,10 +251,11 @@ QUIC via `quinn`. All traffic runs over a single QUIC connection per client.
 
 ### Codec
 
-Opus via `audiopus`. 20 ms frames, 48 kHz, mono. Target bitrate is
-configurable (default 48 kbps). Packet loss concealment uses Opus PLC
-(decode with null input on jitter buffer underrun) on both the server
-mix path and the client receive path.
+Opus via `audiopus`. 20 ms frames, 48 kHz, mono. Encoders use CBR and a
+wideband cap so frames stay small on low-MTU paths (VPN, some Windows UDP
+stacks). Default bitrate is 32 kbps; raise it in config on reliable LANs
+if you want. Packet loss concealment uses Opus PLC (decode with null input
+on jitter buffer underrun) on both the server mix path and the client receive path.
 
 ### Server mix loop
 
@@ -276,8 +277,9 @@ Each tick, for rooms with at least two clients:
 1. Drain the per-client mpsc channels, decode raw Opus packets, and insert
    decoded PCM frames into jitter buffers.
 2. Pop one frame from each client's jitter buffer. On underrun, call Opus
-   PLC for a continuation frame. On overrun, drop the oldest frames to
-   re-sync.
+   PLC, then advance the expected sequence (pops do not advance when the
+   slot is empty, so slightly late packets can still be accepted). On overrun,
+   drop the oldest frames to re-sync.
 3. Compute per-frame RMS. Skip clients that are self-muted, server-muted,
    or below the configurable VAD threshold (default 0.002 RMS) -- they
    contribute no audio to any mix.
@@ -299,10 +301,11 @@ offset on each server start (via `RandomState`) to avoid predictable IDs.
 A fixed-depth circular buffer (default 4 slots = 80 ms; configurable on
 the server via `jitter_depth`). Used on both the server mix path (one per
 upstream client) and the client receive path (one for the downstream mixed
-stream). Packets are inserted by sequence number. Pops return frames in
-order; missing slots return `None` (triggering PLC). Sequence comparisons
-use `wrapping_sub` so the buffer handles 32-bit sequence wraparound
-correctly during long-running sessions.
+stream). Packets are inserted by sequence number. A successful pop returns
+the next frame in order and advances the read position; an empty slot returns
+`None` without advancing, then the caller runs PLC and advances explicitly.
+Sequence comparisons use `wrapping_sub` so the buffer handles 32-bit sequence
+wraparound correctly during long-running sessions.
 
 ### Client pipeline
 
@@ -319,9 +322,10 @@ callbacks for seamless chunk boundaries. The TUI events panel shows the
 active device names and configurations on connect.
 
 Microphone samples flow through a lock-free SPSC ring buffer (`ringbuf`
-crate, configurable capacity, default 200 ms) into an async encode loop
-that accumulates 960-sample frames, encodes each to Opus, and sends QUIC
-datagrams. Incoming mixed datagrams from the server pass through a
+crate, configurable capacity, default 200 ms). An async task runs on a 20 ms
+interval, pulls up to one 960-sample frame per tick (padding with silence if
+the ring is short), encodes to Opus, and sends a QUIC datagram so upstream
+timing matches the server mix clock. Incoming mixed datagrams from the server pass through a
 client-side jitter buffer (same `JitterBuffer` implementation used by the
 server, default 4 slots = 80 ms) that reorders out-of-sequence packets
 and triggers Opus PLC on missing frames. A 20 ms `tokio::select!` tick

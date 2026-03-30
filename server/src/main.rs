@@ -787,6 +787,7 @@ async fn room_mix_loop(
                         tracing::debug!(%cid, "jitter underrun -- PLC");
                         let mut plc = SILENCE_FRAME;
                         let _ = ms.decoder.plc(&mut plc);
+                        ms.jitter_buffer.advance_expected();
                         plc
                     } else {
                         continue;

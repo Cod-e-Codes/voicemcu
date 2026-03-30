@@ -58,21 +58,29 @@ impl JitterBuffer {
         true
     }
 
-    /// Pop the next expected frame. Returns `None` on underrun (caller should PLC).
+    /// Pop the next expected frame if it is present. Returns `None` on underrun without
+    /// advancing `read_seq`, so a slightly late packet can still be [`insert`]d. After emitting
+    /// PLC for a missing frame, call [`Self::advance_expected`].
     pub fn pop(&mut self) -> Option<PcmFrame> {
         if !self.initialized {
             return None;
         }
         let idx = self.read_seq as usize % self.depth;
-        let frame = match self.slots[idx] {
+        match self.slots[idx] {
             Some((slot_seq, frame)) if slot_seq == self.read_seq => {
                 self.slots[idx] = None;
+                self.read_seq = self.read_seq.wrapping_add(1);
                 Some(frame)
             }
             _ => None,
-        };
-        self.read_seq = self.read_seq.wrapping_add(1);
-        frame
+        }
+    }
+
+    /// Advance the playout sequence after a PLC (or other synthetic) frame for a missing packet.
+    pub fn advance_expected(&mut self) {
+        if self.initialized {
+            self.read_seq = self.read_seq.wrapping_add(1);
+        }
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -138,17 +146,29 @@ mod tests {
     }
 
     #[test]
+    fn late_frame_after_underrun_inserts_if_not_advanced() {
+        let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+        jb.insert(0, make_frame(0.1));
+        assert!(jb.pop().is_some());
+        assert!(jb.pop().is_none());
+        assert!(jb.insert(1, make_frame(0.2)));
+        assert!((jb.pop().unwrap()[0] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
     fn overrun_resyncs() {
         let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
         jb.insert(0, make_frame(0.0));
         jb.insert(100, make_frame(1.0));
         let mut found = false;
-        for _ in 0..DEFAULT_JITTER_DEPTH {
-            if let Some(f) = jb.pop()
-                && (f[0] - 1.0).abs() < 1e-6
-            {
-                found = true;
-                break;
+        for _ in 0..64 {
+            if let Some(f) = jb.pop() {
+                if (f[0] - 1.0).abs() < 1e-6 {
+                    found = true;
+                    break;
+                }
+            } else {
+                jb.advance_expected();
             }
         }
         assert!(found, "should find the overrun frame after resync");

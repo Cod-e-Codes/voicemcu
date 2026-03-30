@@ -1,5 +1,5 @@
 use audiopus::coder::{Decoder, Encoder};
-use audiopus::{Application, Bitrate, Channels, SampleRate};
+use audiopus::{Application, Bandwidth, Bitrate, Channels, SampleRate};
 
 use crate::audio::PcmFrame;
 use crate::error::VoiceError;
@@ -15,6 +15,10 @@ impl OpusEncoder {
     pub fn new(bitrate_bps: i32) -> Result<Self, VoiceError> {
         let mut inner = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         inner.set_bitrate(Bitrate::BitsPerSecond(bitrate_bps))?;
+        // CBR + capped bandwidth keeps 20 ms frames well under typical VPN / QUIC path MTUs.
+        // VBR speech can spike past ~1200 byte payloads and fail on some Windows/Tailscale paths.
+        inner.disable_vbr()?;
+        inner.set_max_bandwidth(Bandwidth::Wideband)?;
         Ok(Self { inner })
     }
 

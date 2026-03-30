@@ -10,7 +10,8 @@ pub const FRAME_DURATION_MS: u32 = 20;
 pub const FRAME_SIZE: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1000) as usize;
 pub const CHANNELS: usize = 1;
 pub const MAX_OPUS_PACKET_SIZE: usize = 1275;
-pub const DEFAULT_BITRATE: i32 = 48_000;
+/// Default Opus bitrate (bps). Moderate value with CBR + bandwidth cap in the encoder for MTU-safe frames.
+pub const DEFAULT_BITRATE: i32 = 32_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SignalMessage {
