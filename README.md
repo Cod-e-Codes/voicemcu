@@ -66,7 +66,7 @@ the QUIC endpoint.
 | `--key-file <path>` | TLS private key file (PEM). Used together with `--cert-file`. |
 | `--bitrate <bps>` | Opus bitrate in bits per second (default: 24000). |
 | `--max-room-size <n>` | Maximum clients per room (default: 64). |
-| `--jitter-depth <n>` | Jitter buffer depth in 20 ms frames (default: 4). |
+| `--jitter-depth <n>` | Jitter buffer depth in 20 ms frames (default: 8). |
 | `--vad-threshold <f>` | VAD RMS threshold, 0.0-1.0 (default: 0.002). |
 | `--cleanup-interval <s>` | Empty room cleanup interval in seconds (default: 30). |
 | `--signal-rate <n>` | Signaling commands per second per client (default: 10). |
@@ -131,7 +131,7 @@ cert_file = "cert.pem"       # omit for ephemeral certs
 key_file = "key.pem"         # must be set together with cert_file
 bitrate = 24000              # Opus bitrate (bps) for mixed audio sent to clients
 max_room_size = 64           # max clients per room
-jitter_depth = 4             # jitter buffer slots (each = 20 ms)
+jitter_depth = 8             # jitter buffer slots (each = 20 ms)
 vad_threshold = 0.002        # RMS below this is treated as silence
 cleanup_interval_secs = 30   # how often to garbage-collect empty rooms
 max_display_name = 64        # character limit for display names
@@ -267,28 +267,38 @@ the room is removed from the server. This distributes CPU work across
 tokio's thread pool -- rooms on different threads never contend for locks.
 
 The datagram receiver is completely lock-free: it forwards raw Opus packets
-to the room's mix task through a `tokio::sync::mpsc` channel. The mix task
-owns all per-client audio processing state (jitter buffer, Opus decoder,
-Opus encoder) exclusively -- no locks on the decode/encode/jitter path. The
-only remaining `Mutex` touched per tick is `blocked_peers` (cloned briefly
-to build the exclusion set), which contends only with rare `/block` and
-`/unblock` signaling commands.
+to the room's mix task through a `tokio::sync::mpsc` channel (capacity 256
+per client). The reader task is spawned as soon as the channel exists so
+packets can queue during join signaling instead of relying only on QUIC's
+smaller datagram buffer. The mix task owns all per-client audio processing
+state (jitter buffer, Opus decoder, Opus encoder) exclusively -- no locks on
+the decode/encode/jitter path. The only remaining `Mutex` touched per tick is
+`blocked_peers` (cloned briefly to build the exclusion set), which contends
+only with rare `/block` and `/unblock` signaling commands.
 
-Each tick, for rooms with at least two clients:
+Each tick:
 
 1. Drain the per-client mpsc channels, decode raw Opus packets, and insert
-   decoded PCM frames into jitter buffers.
-2. Pop one frame from each client's jitter buffer. On underrun, call Opus
-   PLC, then advance the expected sequence (pops do not advance when the
-   slot is empty, so slightly late packets can still be accepted). On overrun,
-   drop the oldest frames to re-sync.
-3. Compute per-frame RMS. Skip clients that are self-muted, server-muted,
+   decoded PCM frames into jitter buffers. Decode failures insert a silence
+   frame at that sequence number so playout order does not stall.
+2. **Solo room** (one client): after draining, pop every buffered frame and
+   discard it. Underrun does **not** advance the expected sequence -- the mix
+   clock is not phase-locked to each sender, and advancing without a real
+   frame would desync sequence numbers when a second client joins.
+3. **Multi-client room** (two or more): pop one frame per client for mixing.
+   On underrun, if **no** datagram was drained for that client this tick,
+   skip that client for this mix frame (wait for the network; do not PLC or
+   advance). If datagrams **were** drained but the expected slot is still
+   empty, run Opus PLC and advance the expected sequence. After many
+   consecutive underruns (~1 s), the jitter buffer resets so a quiet or
+   delayed sender can recover. On overrun, drop the oldest frames to re-sync.
+4. Compute per-frame RMS. Skip clients that are self-muted, server-muted,
    or below the configurable VAD threshold (default 0.002 RMS) -- they
    contribute no audio to any mix.
-4. For each destination client, sum all other active clients' frames in f32,
+5. For each destination client, sum all other active clients' frames in f32,
    excluding any peers on the destination's block list.
-5. Apply `tanh` soft clipping to the summed frame to prevent saturation.
-6. Encode the clipped mix to Opus and send as a QUIC datagram.
+6. Apply `tanh` soft clipping to the summed frame to prevent saturation.
+7. Encode the clipped mix to Opus and send as a QUIC datagram.
 
 Room state is a `DashMap<String, Room>` keyed by room code. Each `Room`
 contains a `DashMap<ClientId, ClientState>` holding the client's QUIC
@@ -300,14 +310,20 @@ offset on each server start (via `RandomState`) to avoid predictable IDs.
 
 ### Jitter buffer
 
-A fixed-depth circular buffer (default 4 slots = 80 ms; configurable on
-the server via `jitter_depth`). Used on both the server mix path (one per
-upstream client) and the client receive path (one for the downstream mixed
-stream). Packets are inserted by sequence number. A successful pop returns
-the next frame in order and advances the read position; an empty slot returns
-`None` without advancing, then the caller runs PLC and advances explicitly.
+A fixed-depth circular buffer (default **8** slots = **160** ms; server depth
+is configurable via `jitter_depth`; the client uses the same default for
+downstream playout). Used on both the server mix path (one per upstream
+client) and the client receive path (one for the downstream mixed stream).
+Packets are inserted by sequence number. A successful pop returns the next
+frame in order and advances the read position; an empty slot returns `None`
+without advancing, then the caller runs PLC and advances explicitly (on the
+server multi-client path, only when appropriate -- see **Server mix loop**
+above). `JitterBuffer::reset` clears state for recovery after sustained loss.
 Sequence comparisons use `wrapping_sub` so the buffer handles 32-bit sequence
 wraparound correctly during long-running sessions.
+
+On high-latency or VPN paths (e.g. Tailscale), you can raise `jitter_depth`
+via CLI or config if you still see frequent PLC in logs.
 
 ### Client pipeline
 
@@ -329,7 +345,7 @@ interval, pulls up to one 960-sample frame per tick (padding with silence if
 the ring is short), encodes to Opus, and sends a QUIC datagram so upstream
 timing matches the server mix clock. Incoming mixed datagrams from the server pass through a
 client-side jitter buffer (same `JitterBuffer` implementation used by the
-server, default 4 slots = 80 ms) that reorders out-of-sequence packets
+server, default 8 slots = 160 ms) that reorders out-of-sequence packets
 and triggers Opus PLC on missing frames. A 20 ms `tokio::select!` tick
 pops frames from the jitter buffer and pushes decoded PCM into a second
 ring buffer drained by the speaker callback. No locks touch the real-time

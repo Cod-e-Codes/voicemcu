@@ -1,10 +1,8 @@
 use crate::audio::PcmFrame;
 
-// DESIGN: 4 slots = 80 ms of jitter tolerance at 20 ms/frame. This balances
-// latency (lower is better for conversational interactivity) against packet
-// reordering tolerance (higher absorbs more network jitter). 80 ms suits
-// typical internet paths; LAN deployments could use 2-3 slots.
-pub const DEFAULT_JITTER_DEPTH: usize = 4;
+// DESIGN: 8 slots = 160 ms of jitter tolerance at 20 ms/frame. Tailscale and
+// other VPN paths often need extra headroom; LAN can lower via config.
+pub const DEFAULT_JITTER_DEPTH: usize = 8;
 
 pub struct JitterBuffer {
     // Each slot carries its sequence number so we can distinguish fresh frames
@@ -90,6 +88,14 @@ impl JitterBuffer {
     pub fn depth(&self) -> usize {
         self.depth
     }
+
+    /// Clear state so the next [`Self::insert`] re-primes `read_seq`. Used when playout has
+    /// PLC'd far ahead of the sender and real packets are being rejected as late.
+    pub fn reset(&mut self) {
+        self.slots.fill(None);
+        self.read_seq = 0;
+        self.initialized = false;
+    }
 }
 
 #[cfg(test)]
@@ -115,6 +121,17 @@ mod tests {
     fn pop_empty_returns_none() {
         let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
         assert!(jb.pop().is_none());
+    }
+
+    #[test]
+    fn reset_allows_fresh_prime() {
+        let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+        jb.insert(0, make_frame(0.1));
+        jb.pop();
+        jb.reset();
+        assert!(!jb.is_initialized());
+        assert!(jb.insert(100, make_frame(0.2)));
+        assert!((jb.pop().unwrap()[0] - 0.2).abs() < 1e-6);
     }
 
     #[test]
@@ -176,7 +193,8 @@ mod tests {
 
     #[test]
     fn overrun_preserves_frames_already_buffered_in_window() {
-        let mut jb = JitterBuffer::new(DEFAULT_JITTER_DEPTH);
+        // Fixed depth: this scenario triggers overrun at seq 104 only when depth ≤ 4.
+        let mut jb = JitterBuffer::new(4);
         jb.insert(100, make_frame(0.1));
         jb.insert(101, make_frame(0.2));
         jb.insert(102, make_frame(0.3));

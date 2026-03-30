@@ -275,7 +275,17 @@ async fn handle_connection(incoming: quinn::Incoming, server: Arc<Server>) -> Re
     };
 
     // Create the per-client audio channel and register in the room.
-    let (audio_tx, audio_rx) = mpsc::channel::<AudioPacket>(32);
+    // Large enough for 2+ clients at 50 pkt/s plus mix-loop scheduling jitter;
+    // overflow drops packets and causes endless PLC (see room_mix_loop).
+    let (audio_tx, audio_rx) = mpsc::channel::<AudioPacket>(256);
+
+    // Start draining QUIC datagrams before Joined / RoomInfo so a fast client cannot
+    // fill the QUIC layer while we await signaling; packets queue in this mpsc instead.
+    let conn_for_datagrams = connection.clone();
+    let datagram_handle = tokio::spawn(async move {
+        recv_datagrams(conn_for_datagrams, audio_tx, client_id).await;
+    });
+
     let (mix_cmd_tx, became_host) = {
         let room = server
             .rooms
@@ -331,11 +341,6 @@ async fn handle_connection(incoming: quinn::Incoming, server: Arc<Server>) -> Re
         },
         Some(client_id),
     );
-
-    let conn_for_datagrams = connection.clone();
-    let datagram_handle = tokio::spawn(async move {
-        recv_datagrams(conn_for_datagrams, audio_tx, client_id).await;
-    });
 
     handle_signaling(&mut recv, &mut send, &server, &room_code, client_id).await;
 
@@ -419,7 +424,7 @@ async fn recv_datagrams(
             })
             .is_err()
         {
-            tracing::trace!(%client_id, seq = header.sequence, "audio channel full, dropping packet");
+            tracing::debug!(%client_id, seq = header.sequence, "audio channel full, dropping packet");
         }
     }
 }
@@ -684,6 +689,10 @@ struct MixClientState {
     encoder: OpusEncoder,
     audio_rx: mpsc::Receiver<AudioPacket>,
     out_sequence: u32,
+    /// Consecutive multi-client pops that needed PLC; used to detect desync and reset jitter.
+    plc_streak: u16,
+    /// Set while draining `audio_rx` this tick — if false on underrun, the mixer ran ahead of the network.
+    had_rx_this_tick: bool,
 }
 
 /// Dedicated mix loop for a single room. Spawned when the room is created,
@@ -736,6 +745,8 @@ async fn room_mix_loop(
                             encoder,
                             audio_rx,
                             out_sequence: 0,
+                            plc_streak: 0,
+                            had_rx_this_tick: false,
                         },
                     );
                     tracing::debug!(%client_id, room = %room_code, "mix: client added");
@@ -752,24 +763,34 @@ async fn room_mix_loop(
             }
         }
 
-        // --- 2. Skip if fewer than two participants ---
-        if mix_clients.len() < 2 {
-            for ms in mix_clients.values_mut() {
-                while ms.audio_rx.try_recv().is_ok() {}
-            }
-            continue;
+        // --- 2. Drain raw Opus packets, decode, insert into jitter buffers ---
+        for ms in mix_clients.values_mut() {
+            ms.had_rx_this_tick = false;
         }
-
-        // --- 3. Drain raw Opus packets, decode, insert into jitter buffers ---
         for (cid, ms) in &mut mix_clients {
             while let Ok(packet) = ms.audio_rx.try_recv() {
+                ms.had_rx_this_tick = true;
                 let mut pcm = [0.0f32; FRAME_SIZE];
                 if ms.decoder.decode(&packet.data, &mut pcm).is_ok() {
                     ms.jitter_buffer.insert(packet.sequence, pcm);
                 } else {
                     tracing::debug!(%cid, seq = packet.sequence, "mix: decode failed");
+                    // Keep sequence continuity so read_seq does not stall; a missing slot
+                    // would otherwise never pop and (in solo) we must not advance on empty pop.
+                    let _ = ms.jitter_buffer.insert(packet.sequence, SILENCE_FRAME);
                 }
             }
+        }
+
+        // --- 3. Solo: drain jitter with real pops only. Do not advance_expected on
+        // underrun — the mix tick is not locked to each sender's phase; advancing
+        // read_seq while the next packet is still in flight makes inserts look late
+        // and causes permanent PLC skew after a second client joins.
+        if mix_clients.len() < 2 {
+            for ms in mix_clients.values_mut() {
+                while ms.jitter_buffer.pop().is_some() {}
+            }
+            continue;
         }
 
         // --- 4. Pop frames from jitter buffers, PLC on underrun ---
@@ -779,20 +800,36 @@ async fn room_mix_loop(
         };
 
         client_frames.clear();
+        // ~1s at 20ms/tick — recover after sender pause, drops, or seq desync.
+        const PLC_RESET_STREAK: u16 = 50;
         for (cid, ms) in &mut mix_clients {
-            let frame = match ms.jitter_buffer.pop() {
-                Some(f) => f,
-                None => {
-                    if ms.jitter_buffer.is_initialized() {
-                        tracing::debug!(%cid, "jitter underrun -- PLC");
-                        let mut plc = SILENCE_FRAME;
-                        let _ = ms.decoder.plc(&mut plc);
-                        ms.jitter_buffer.advance_expected();
-                        plc
-                    } else {
-                        continue;
-                    }
+            let frame = if let Some(f) = ms.jitter_buffer.pop() {
+                ms.plc_streak = 0;
+                f
+            } else if !ms.jitter_buffer.is_initialized() {
+                continue;
+            } else {
+                ms.plc_streak = ms.plc_streak.saturating_add(1);
+                if ms.plc_streak >= PLC_RESET_STREAK {
+                    tracing::warn!(
+                        %cid,
+                        streak = ms.plc_streak,
+                        "jitter: reset buffer after sustained underrun (likely sender pause or seq desync)"
+                    );
+                    ms.jitter_buffer.reset();
+                    ms.plc_streak = 0;
+                    continue;
                 }
+                if !ms.had_rx_this_tick {
+                    // Mix tick is not phase-locked to each sender; do not advance read_seq
+                    // until a datagram arrives for this client (avoids late-insert death spiral).
+                    continue;
+                }
+                tracing::debug!(%cid, "jitter underrun -- PLC");
+                let mut plc = SILENCE_FRAME;
+                let _ = ms.decoder.plc(&mut plc);
+                ms.jitter_buffer.advance_expected();
+                plc
             };
 
             let active = room.clients.get(cid).is_some_and(|state| {
