@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use voicemcu_common::protocol::QUIC_MTU_DISCOVERY_UPPER_BOUND;
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub struct TlsSetup {
@@ -75,6 +77,9 @@ pub fn setup_tls(
     ));
 
     let mut transport = quinn::TransportConfig::default();
+    let mut mtu = quinn::MtuDiscoveryConfig::default();
+    mtu.upper_bound(QUIC_MTU_DISCOVERY_UPPER_BOUND);
+    transport.mtu_discovery_config(Some(mtu));
     transport.datagram_receive_buffer_size(Some(datagram_buffer));
     server_config.transport_config(Arc::new(transport));
 

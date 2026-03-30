@@ -582,7 +582,13 @@ fn build_client_config(mode: CertMode) -> Result<quinn::ClientConfig, BoxError> 
         .with_no_client_auth();
 
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?;
-    Ok(quinn::ClientConfig::new(Arc::new(quic_crypto)))
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_crypto));
+    let mut transport = quinn::TransportConfig::default();
+    let mut mtu = quinn::MtuDiscoveryConfig::default();
+    mtu.upper_bound(voicemcu_common::protocol::QUIC_MTU_DISCOVERY_UPPER_BOUND);
+    transport.mtu_discovery_config(Some(mtu));
+    client_config.transport_config(Arc::new(transport));
+    Ok(client_config)
 }
 
 #[derive(Debug)]

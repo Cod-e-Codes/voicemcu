@@ -10,8 +10,13 @@ pub const FRAME_DURATION_MS: u32 = 20;
 pub const FRAME_SIZE: usize = (SAMPLE_RATE * FRAME_DURATION_MS / 1000) as usize;
 pub const CHANNELS: usize = 1;
 pub const MAX_OPUS_PACKET_SIZE: usize = 1275;
-/// Default Opus bitrate (bps). Moderate value with CBR + bandwidth cap in the encoder for MTU-safe frames.
-pub const DEFAULT_BITRATE: i32 = 32_000;
+/// Maximum encoded Opus payload length we ever put on the wire (before framing).
+/// Keeps application + QUIC headers under typical Tailscale / IPv6 path MTUs (~1280).
+pub const MAX_OPUS_WIRE_PAYLOAD: usize = 480;
+/// Default Opus bitrate (bps). Used with CBR, narrowband cap, and [`MAX_OPUS_WIRE_PAYLOAD`].
+pub const DEFAULT_BITRATE: i32 = 24_000;
+/// Upper bound for Quinn MTU discovery: avoid growing UDP payloads past VPN-safe sizes.
+pub const QUIC_MTU_DISCOVERY_UPPER_BOUND: u16 = 1200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SignalMessage {

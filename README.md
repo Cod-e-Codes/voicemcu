@@ -64,7 +64,7 @@ the QUIC endpoint.
 | `--bind <addr>` | Bind address (default: `0.0.0.0:4433`). |
 | `--cert-file <path>` | TLS certificate file (PEM). Generated and saved if missing. |
 | `--key-file <path>` | TLS private key file (PEM). Used together with `--cert-file`. |
-| `--bitrate <bps>` | Opus bitrate in bits per second (default: 32000). |
+| `--bitrate <bps>` | Opus bitrate in bits per second (default: 24000). |
 | `--max-room-size <n>` | Maximum clients per room (default: 64). |
 | `--jitter-depth <n>` | Jitter buffer depth in 20 ms frames (default: 4). |
 | `--vad-threshold <f>` | VAD RMS threshold, 0.0-1.0 (default: 0.002). |
@@ -96,7 +96,7 @@ voicemcu-client <server> <room> <name> [options]
 | `--danger-skip-verify` | Skip all certificate verification. Prints a warning to stderr and the TUI events panel. |
 | `--test-tone` | Send a 440 Hz sine wave instead of microphone input. |
 | `--log-file <path>` | Log file path (default: `voicemcu.log`). |
-| `--bitrate <bps>` | Opus upstream bitrate in bits per second (default: 32000). |
+| `--bitrate <bps>` | Opus upstream bitrate in bits per second (default: 24000). |
 | `--ring-buffer-frames <n>` | Audio ring buffer size in 20 ms frames (default: 10). |
 | `--max-events <n>` | Maximum events in TUI log (default: 1000). |
 | `--input-device <name>` | Microphone device name (default: system default). |
@@ -129,7 +129,7 @@ file, which take precedence over built-in defaults.
 bind = "0.0.0.0:4433"
 cert_file = "cert.pem"       # omit for ephemeral certs
 key_file = "key.pem"         # must be set together with cert_file
-bitrate = 32000              # Opus bitrate (bps) for mixed audio sent to clients
+bitrate = 24000              # Opus bitrate (bps) for mixed audio sent to clients
 max_room_size = 64           # max clients per room
 jitter_depth = 4             # jitter buffer slots (each = 20 ms)
 vad_threshold = 0.002        # RMS below this is treated as silence
@@ -149,7 +149,7 @@ Run `voicemcu-server --dump-config` to emit a complete default config file.
 
 ```toml
 log_file = "voicemcu.log"    # diagnostic log output path
-bitrate = 32000              # Opus bitrate (bps) for upstream mic audio
+bitrate = 24000              # Opus bitrate (bps) for upstream mic audio
 ring_buffer_frames = 10      # audio ring buffer size in 20 ms frames
 max_events = 1000            # max entries in the TUI events log
 # input_device = "Microphone (Realtek)"  # omit for system default
@@ -251,10 +251,12 @@ QUIC via `quinn`. All traffic runs over a single QUIC connection per client.
 
 ### Codec
 
-Opus via `audiopus`. 20 ms frames, 48 kHz, mono. Encoders use CBR and a
-wideband cap so frames stay small on low-MTU paths (VPN, some Windows UDP
-stacks). Default bitrate is 32 kbps; raise it in config on reliable LANs
-if you want. Packet loss concealment uses Opus PLC (decode with null input
+Opus via `audiopus`. 20 ms frames, 48 kHz, mono. Encoders use CBR, a
+narrowband cap, and a hard ceiling on encoded frame size so QUIC datagrams
+stay under tight VPN MTUs (e.g. Tailscale). Quinn MTU discovery is capped
+the same way on both endpoints. Default bitrate is 24 kbps; you can raise
+it on reliable LANs, but the wire-size cap still applies. Packet loss
+concealment uses Opus PLC (decode with null input
 on jitter buffer underrun) on both the server mix path and the client receive path.
 
 ### Server mix loop

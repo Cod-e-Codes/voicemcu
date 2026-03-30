@@ -1,8 +1,9 @@
 use audiopus::coder::{Decoder, Encoder};
-use audiopus::{Application, Bandwidth, Bitrate, Channels, SampleRate};
+use audiopus::{Application, Bandwidth, Bitrate, Channels, ErrorCode, SampleRate};
 
 use crate::audio::PcmFrame;
 use crate::error::VoiceError;
+use crate::protocol::MAX_OPUS_WIRE_PAYLOAD;
 
 pub struct OpusEncoder {
     inner: Encoder,
@@ -15,16 +16,40 @@ impl OpusEncoder {
     pub fn new(bitrate_bps: i32) -> Result<Self, VoiceError> {
         let mut inner = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         inner.set_bitrate(Bitrate::BitsPerSecond(bitrate_bps))?;
-        // CBR + capped bandwidth keeps 20 ms frames well under typical VPN / QUIC path MTUs.
-        // VBR speech can spike past ~1200 byte payloads and fail on some Windows/Tailscale paths.
+        // CBR + narrowband cap keeps 20 ms frames within [`MAX_OPUS_WIRE_PAYLOAD`].
         inner.disable_vbr()?;
-        inner.set_max_bandwidth(Bandwidth::Wideband)?;
+        inner.set_max_bandwidth(Bandwidth::Narrowband)?;
         Ok(Self { inner })
     }
 
     pub fn encode(&mut self, pcm: &PcmFrame, output: &mut [u8]) -> Result<usize, VoiceError> {
-        let len = self.inner.encode_float(pcm, output)?;
-        Ok(len)
+        let cap = core::cmp::min(output.len(), MAX_OPUS_WIRE_PAYLOAD);
+        if cap == 0 {
+            return Err(VoiceError::Protocol(
+                "opus encode output buffer has zero usable length".into(),
+            ));
+        }
+        let saved = self.inner.bitrate()?;
+        let mut attempt = 0u8;
+        loop {
+            match self.inner.encode_float(pcm, &mut output[..cap]) {
+                Ok(len) => {
+                    if attempt > 0 {
+                        let _ = self.inner.set_bitrate(saved);
+                    }
+                    return Ok(len);
+                }
+                Err(audiopus::Error::Opus(ErrorCode::BufferTooSmall)) if attempt < 2 => {
+                    let bps = if attempt == 0 { 16_000 } else { 12_000 };
+                    self.inner.set_bitrate(Bitrate::BitsPerSecond(bps))?;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    let _ = self.inner.set_bitrate(saved);
+                    return Err(e.into());
+                }
+            }
+        }
     }
 }
 
@@ -63,7 +88,9 @@ impl OpusDecoder {
 mod tests {
     use super::*;
     use crate::audio::{SILENCE_FRAME, compute_rms};
-    use crate::protocol::{DEFAULT_BITRATE, FRAME_SIZE, MAX_OPUS_PACKET_SIZE, SAMPLE_RATE};
+    use crate::protocol::{
+        DEFAULT_BITRATE, FRAME_SIZE, MAX_OPUS_PACKET_SIZE, MAX_OPUS_WIRE_PAYLOAD, SAMPLE_RATE,
+    };
 
     fn sine_frame(freq: f32, phase: &mut f32) -> PcmFrame {
         let mut frame = SILENCE_FRAME;
@@ -88,7 +115,7 @@ mod tests {
 
         let mut opus_buf = [0u8; MAX_OPUS_PACKET_SIZE];
         let len = enc.encode(&original, &mut opus_buf).expect("encode");
-        assert!(len > 0 && len <= MAX_OPUS_PACKET_SIZE);
+        assert!(len > 0 && len <= MAX_OPUS_WIRE_PAYLOAD);
 
         let mut decoded = SILENCE_FRAME;
         let samples = dec.decode(&opus_buf[..len], &mut decoded).expect("decode");
@@ -139,5 +166,20 @@ mod tests {
         // Opus is efficient with silence; the packet should be much smaller
         // than a music-carrying frame
         assert!(len < 100, "silence packet unexpectedly large: {len} bytes");
+    }
+
+    #[test]
+    fn high_requested_bitrate_still_fits_wire_cap() {
+        let mut enc = OpusEncoder::new(64_000).expect("encoder");
+        let mut phase = 0.0f32;
+        let mut opus_buf = [0u8; MAX_OPUS_PACKET_SIZE];
+        for _ in 0..20 {
+            let frame = sine_frame(880.0, &mut phase);
+            let len = enc.encode(&frame, &mut opus_buf).expect("encode");
+            assert!(
+                len <= MAX_OPUS_WIRE_PAYLOAD,
+                "encoded len {len} exceeds wire cap {MAX_OPUS_WIRE_PAYLOAD}"
+            );
+        }
     }
 }
